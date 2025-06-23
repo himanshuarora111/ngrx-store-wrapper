@@ -1,6 +1,6 @@
 # ngrx-store-wrapper
 
-A lightweight Angular library that simplifies dynamic state management with NgRx. This library allows you to create, update, and remove store slices at runtime without manual boilerplate code.
+**ngrx-store-wrapper** is a lightweight Angular library for **dynamic NgRx state management**. It allows you to inject reducers and selectors at runtime, enabling powerful, modular, and flexible applications without boilerplate. Ideal for large Angular projects that rely on **NgRx store**.
 
 ## Features
 
@@ -19,6 +19,7 @@ A lightweight Angular library that simplifies dynamic state management with NgRx
   - Warns when more than 100 dynamic keys are registered
   - Automatic cleanup of unused reducers
   - Efficient state observation through selectors
+  - Automatic subscription cleanup when components are destroyed
 
 - **Easy Integration**
   - Singleton service provided in root
@@ -80,7 +81,7 @@ storeWrapper.remove('user');
 - **Dynamic Keys**: Returns the value directly (e.g., `{ name: 'Alice', age: 25 }`)
 - **Static Keys**: Returns raw state slice directly (e.g., `{ name: 'Alice', age: 25 }`)
 
-**Note**: Even though dynamic state is stored internally as `{ value: T }`, the `get()` method automatically extracts and returns just the value. This means users don't need to handle the `{ value: ... }` wrapper - they get the actual data directly.
+**Note**: The library now returns the actual value directly without wrapping it in a payload object. This means users get the exact data they set without any additional wrapping.
 
 ## Key Concepts
 
