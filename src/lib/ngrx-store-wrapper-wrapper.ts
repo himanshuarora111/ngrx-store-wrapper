@@ -2,6 +2,7 @@ import { inject, runInInjectionContext, EnvironmentInjector } from '@angular/cor
 import { Store } from '@ngrx/store';
 import { ReducerManager } from '@ngrx/store';
 import { NgrxStoreWrapperService, StoreState } from './ngrx-store-wrapper.service';
+import { StorageType } from './storage-type.enum';
 
 let initialized = false;
 
@@ -34,5 +35,13 @@ export const storeWrapper = {
   remove: (key: string) => {
     ensureInitialized();
     service.remove(key);
+  },
+  enablePersistence: (key: string, type: StorageType) => {
+    ensureInitialized();
+    service.enablePersistence(key, type);
+  },
+  disablePersistence: (key: string) => {
+    ensureInitialized();
+    service.disablePersistence(key);
   }
 };
