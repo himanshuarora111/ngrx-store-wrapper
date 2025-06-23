@@ -1,7 +1,26 @@
-import { Store, createAction, createReducer, on, ActionReducerMap, ReducerManager, createSelector, select } from '@ngrx/store';
+// ngrx-store-wrapper.service.ts
+import {
+  Store,
+  createAction,
+  createReducer,
+  on,
+  ActionReducerMap,
+  ReducerManager,
+  createSelector,
+  select,
+} from '@ngrx/store';
 import { Observable } from 'rxjs';
 import { take } from 'rxjs/operators';
-import { isDevMode, Injectable } from '@angular/core';
+import {
+  isDevMode,
+  Injectable,
+  inject,
+  DestroyRef,
+  effect,
+  EnvironmentInjector,
+  runInInjectionContext,
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 
 export interface StoreState {
   [key: string]: any;
@@ -10,7 +29,7 @@ export interface StoreState {
 const DYNAMIC_KEY_WARN_THRESHOLD = 100;
 
 @Injectable({
-  providedIn: 'root'
+  providedIn: 'root',
 })
 export class NgrxStoreWrapperService {
   private reducerManager!: ReducerManager;
@@ -32,8 +51,8 @@ export class NgrxStoreWrapperService {
       (state: StoreState): StoreState => state
     );
 
-    this.store.pipe(select(selectWholeState), take(1)).subscribe(state => {
-      Object.keys(state).forEach(key => this.staticReducerKeys.add(key));
+    this.store.pipe(select(selectWholeState), take(1)).subscribe((state) => {
+      Object.keys(state).forEach((key) => this.staticReducerKeys.add(key));
     });
   }
 
@@ -45,20 +64,20 @@ export class NgrxStoreWrapperService {
     if (this.staticReducerKeys.has(key)) {
       if (isDevMode()) {
         console.warn(
-          `[DynamicStoreHelper] Attempted to set value for static reducer key: "${key}". This operation is ignored.`
+          `[ngrx-store-wrapper] Attempted to set value for static reducer key: "${key}". This operation is ignored.`
         );
       }
       return;
     }
 
     if (!this.dynamicActions[`set${key}`]) {
-      this.dynamicActions[`set${key}`] = createAction(`[${key}] Set`, (payload: any) => ({ payload }));
+      this.dynamicActions[`set${key}`] = createAction(`[${key}] Set`, (value: any) => ({ value }));
     }
 
     if (!this.dynamicReducers[key]) {
       const reducer = createReducer(
-        { value: null },
-        on(this.dynamicActions[`set${key}`], (state, { payload }: { payload: any }) => ({ value: payload }))
+        null,
+        on(this.dynamicActions[`set${key}`], (state, { value }: { value: any }) => value)
       );
 
       this.reducerManager.addReducer(key, reducer);
@@ -66,8 +85,7 @@ export class NgrxStoreWrapperService {
 
       if (isDevMode() && Object.keys(this.dynamicReducers).length > DYNAMIC_KEY_WARN_THRESHOLD) {
         console.warn(
-          `[DynamicStoreHelper] Warning: More than ${DYNAMIC_KEY_WARN_THRESHOLD} dynamic store keys have been registered.\n` +
-          `Consider pruning unused keys to avoid potential memory or performance issues.`
+          `[ngrx-store-wrapper] More than ${DYNAMIC_KEY_WARN_THRESHOLD} dynamic store keys registered.`
         );
       }
     }
@@ -75,12 +93,12 @@ export class NgrxStoreWrapperService {
     if (!this.selectors[key]) {
       this.selectors[key] = createSelector(
         (state: StoreState) => state[key],
-        (state: { value: any }) => state?.value
+        (state: any) => state
       );
     }
 
     const action = this.dynamicActions[`set${key}`];
-    this.store.dispatch(action({ payload: value }));
+    this.store.dispatch(action(value));
   }
 
   public get<T = any>(key: string): Observable<T> {
@@ -88,23 +106,27 @@ export class NgrxStoreWrapperService {
       throw new Error('Store must be initialized before getting data');
     }
 
-    if (this.staticReducerKeys.has(key)) {
-      if (!this.selectors[key]) {
-        this.selectors[key] = createSelector(
-          (state: StoreState) => state[key],
-          (state) => state
-        );
-      }
-    } else {
-      if (!this.selectors[key]) {
-        this.selectors[key] = createSelector(
-          (state: StoreState) => state[key],
-          (state: { value: T }) => state?.value
-        );
-      }
+    if (!this.selectors[key]) {
+      this.selectors[key] = createSelector(
+        (state: StoreState) => state[key],
+        (val: T) => val
+      );
     }
 
-    return this.store.pipe(select(this.selectors[key]));
+    const observable$ = this.store.pipe(select(this.selectors[key]));
+
+    try {
+      const destroyRef = inject(DestroyRef);
+      return observable$.pipe(takeUntilDestroyed(destroyRef));
+    } catch {
+      if (isDevMode()) {
+        console.warn(
+          `[ngrx-store-wrapper] Auto-unsubscribe only works in components/services. ` +
+            `You're using 'get("${key}")' outside an Angular injection context.`
+        );
+      }
+      return observable$;
+    }
   }
 
   public remove(key: string): void {
