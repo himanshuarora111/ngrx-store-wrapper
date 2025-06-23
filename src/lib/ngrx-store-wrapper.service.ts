@@ -16,21 +16,19 @@ import {
   Injectable,
   inject,
   DestroyRef,
-  effect,
-  EnvironmentInjector,
-  runInInjectionContext,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { StorageType } from './storage-type.enum';
 
 export interface StoreState {
   [key: string]: any;
 }
 
 const DYNAMIC_KEY_WARN_THRESHOLD = 100;
+const LOCAL_KEY_META = '__ngrx_wrapper_persisted_keys__';
+const SESSION_KEY_META = '__ngrx_wrapper_persisted_keys__';
 
-@Injectable({
-  providedIn: 'root',
-})
+@Injectable({ providedIn: 'root' })
 export class NgrxStoreWrapperService {
   private reducerManager!: ReducerManager;
   private store!: Store<StoreState>;
@@ -39,8 +37,8 @@ export class NgrxStoreWrapperService {
   private dynamicReducers: ActionReducerMap<StoreState> = {};
   private dynamicActions: Record<string, any> = {};
   private selectors: Record<string, any> = {};
+  private persistedKeys: Map<string, StorageType> = new Map();
 
-  constructor() {}
 
   public initializeStore(store: Store<StoreState>, reducerManager: ReducerManager): void {
     this.store = store;
@@ -54,6 +52,8 @@ export class NgrxStoreWrapperService {
     this.store.pipe(select(selectWholeState), take(1)).subscribe((state) => {
       Object.keys(state).forEach((key) => this.staticReducerKeys.add(key));
     });
+    this.loadPersistedKeys();
+    this.restorePersistedState();
   }
 
   public set(key: string, value: any): void {
@@ -77,7 +77,7 @@ export class NgrxStoreWrapperService {
     if (!this.dynamicReducers[key]) {
       const reducer = createReducer(
         null,
-        on(this.dynamicActions[`set${key}`], (state, { value }: { value: any }) => value)
+        on(this.dynamicActions[`set${key}`], (_state, { value }: { value: any }) => value)
       );
 
       this.reducerManager.addReducer(key, reducer);
@@ -99,6 +99,12 @@ export class NgrxStoreWrapperService {
 
     const action = this.dynamicActions[`set${key}`];
     this.store.dispatch(action(value));
+
+    if (this.persistedKeys.has(key)) {
+      const type = this.persistedKeys.get(key)!;
+      const storage = type === StorageType.Local ? localStorage : sessionStorage;
+      storage.setItem(key, JSON.stringify(value));
+    }
   }
 
   public get<T = any>(key: string): Observable<T> {
@@ -136,5 +142,94 @@ export class NgrxStoreWrapperService {
     delete this.dynamicReducers[key];
     delete this.dynamicActions[`set${key}`];
     delete this.selectors[key];
+
+    if (this.persistedKeys.has(key)) {
+      const type = this.persistedKeys.get(key)!;
+      const storage = type === StorageType.Local ? localStorage : sessionStorage;
+      storage.removeItem(key);
+      this.persistedKeys.delete(key);
+      this.savePersistedKeys();
+    }
+  }
+
+  public enablePersistence(key: string, type: StorageType): void {
+    this.persistedKeys.set(key, type);
+    this.savePersistedKeys();
+
+    const storage = type === StorageType.Local ? localStorage : sessionStorage;
+    const valueInStorage = storage.getItem(key);
+
+    if (valueInStorage !== null) {
+      try {
+        this.set(key, JSON.parse(valueInStorage));
+      } catch (e) {
+        console.warn(`[ngrx-store-wrapper] Failed to parse persisted value for key: ${key}`);
+      }
+    } else {
+      this.store.pipe(select((state) => state[key]), take(1)).subscribe((val) => {
+        if (val !== undefined) {
+          try {
+            storage.setItem(key, JSON.stringify(val));
+          } catch {
+            console.warn(`[ngrx-store-wrapper] Failed to persist current value for key: ${key}`);
+          }
+        }
+      });
+    }
+  }
+
+  public disablePersistence(key: string): void {
+    if (!this.persistedKeys.has(key)) return;
+    const type = this.persistedKeys.get(key)!;
+    const storage = type === StorageType.Local ? localStorage : sessionStorage;
+    storage.removeItem(key);
+    this.persistedKeys.delete(key);
+    this.savePersistedKeys();
+  }
+
+  private loadPersistedKeys(): void {
+    const local = localStorage.getItem(LOCAL_KEY_META);
+    const session = sessionStorage.getItem(SESSION_KEY_META);
+
+    if (local) {
+      try {
+        const parsed = JSON.parse(local);
+        Object.keys(parsed).forEach((key) => this.persistedKeys.set(key, StorageType.Local));
+      } catch {}
+    }
+
+    if (session) {
+      try {
+        const parsed = JSON.parse(session);
+        Object.keys(parsed).forEach((key) => this.persistedKeys.set(key, StorageType.Session));
+      } catch {}
+    }
+  }
+
+  private savePersistedKeys(): void {
+    const local: Record<string, boolean> = {};
+    const session: Record<string, boolean> = {};
+
+    this.persistedKeys.forEach((type, key) => {
+      if (type === StorageType.Local) local[key] = true;
+      if (type === StorageType.Session) session[key] = true;
+    });
+
+    localStorage.setItem(LOCAL_KEY_META, JSON.stringify(local));
+    sessionStorage.setItem(SESSION_KEY_META, JSON.stringify(session));
+  }
+
+  private restorePersistedState(): void {
+    this.persistedKeys.forEach((type, key) => {
+      const storage = type === StorageType.Local ? localStorage : sessionStorage;
+      const value = storage.getItem(key);
+      if (value) {
+        try {
+          this.set(key, JSON.parse(value));
+        } catch {
+          console.warn(`[ngrx-store-wrapper] Could not parse persisted data for key: ${key}`);
+        }
+      }
+    });
   }
 }

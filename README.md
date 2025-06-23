@@ -9,6 +9,12 @@
   - Automatically generates reducers, actions, and selectors
   - Handles both static and dynamic reducers
 
+- **Persistence Support**
+  - Persistent storage using localStorage or sessionStorage
+  - Automatic state restoration on application load
+  - Support for both local and session persistence
+  - Easy persistence toggle for store keys
+
 - **Safety Features**
   - Automatic detection of static reducers
   - Protection against static reducer overwriting
@@ -20,11 +26,12 @@
   - Automatic cleanup of unused reducers
   - Efficient state observation through selectors
   - Automatic subscription cleanup when components are destroyed
+  - Automatic cleanup of persisted data when keys are removed
 
 - **Easy Integration**
   - Singleton service provided in root
   - Compatible with Angular's standalone components
-  - Simple API surface with set(), get(), and remove()
+  - Simple API surface with set(), get(), remove(), enablePersistence(), and disablePersistence()
 
 ## Installation
 
@@ -67,6 +74,12 @@ storeWrapper.get('user').subscribe(user => {
 
 // Remove a dynamic store slice
 storeWrapper.remove('user');
+
+// Enable persistence for a store key
+storeWrapper.enablePersistence('user', StorageType.Local);
+
+// Disable persistence for a store key
+storeWrapper.disablePersistence('user');
 ```
 
 ## API Reference
@@ -76,6 +89,12 @@ storeWrapper.remove('user');
 | `set(key: string, value: any)` | Sets or updates data for a dynamic key | `void` | Creates reducer/action/selector automatically |
 | `get<T = any>(key: string)` | Returns observable of state | `Observable<T>` | Returns `{ value: T }` for dynamic keys, raw state for static keys |
 | `remove(key: string)` | Removes dynamic reducer, action, and selector | `void` | Only removes dynamic keys |
+| `enablePersistence(key: string, type: StorageType)` | Enables persistence for a store key | `void` | `type` can be `StorageType.Local` or `StorageType.Session` |
+| `disablePersistence(key: string)` | Disables persistence for a store key | `void` | Removes stored data from persistence |
+
+### StorageType Enum
+- `StorageType.Local`: Persists data in localStorage (persists across sessions)
+- `StorageType.Session`: Persists data in sessionStorage (persists only for current session)
 
 ### State Return Types
 - **Dynamic Keys**: Returns the value directly (e.g., `{ name: 'Alice', age: 25 }`)
@@ -123,11 +142,18 @@ interface StoreState {
    - Clean up unused dynamic keys with `remove()`
    - Be cautious of creating more than 100 dynamic keys
    - Remove reducers when components are destroyed
+   - Clean up persisted data when it's no longer needed
 
 3. **State Management**
    - Use meaningful, unique keys
    - Consider prefixing keys in large applications
    - Handle Observable errors in subscriptions
+   - Use `enablePersistence()` for data that needs to persist across sessions
+
+4. **Persistence Usage**
+   - Use `StorageType.Local` for data that should persist across browser sessions
+   - Use `StorageType.Session` for data that should only persist during current session
+   - Remember to call `disablePersistence()` when data should no longer be persisted
 
 ## Development
 
