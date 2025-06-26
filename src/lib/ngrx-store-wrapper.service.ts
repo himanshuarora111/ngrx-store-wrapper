@@ -7,18 +7,22 @@ import {
   ActionReducerMap,
   ReducerManager,
   createSelector,
-  select,
+  select
 } from '@ngrx/store';
-import { Observable } from 'rxjs';
-import { take } from 'rxjs/operators';
+import { Observable, interval, Subscription, of } from 'rxjs';
+import { take, catchError, startWith } from 'rxjs/operators';
 import {
   isDevMode,
   Injectable,
   inject,
   DestroyRef,
+  Injector,
+  Type,
+  InjectFlags
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { StorageType } from './storage-type.enum';
+import { HttpClient, HttpHeaders } from '@angular/common/http';
 
 export interface StoreState {
   [key: string]: any;
@@ -27,6 +31,43 @@ export interface StoreState {
 const DYNAMIC_KEY_WARN_THRESHOLD = 100;
 const LOCAL_KEY_META = '__ngrx_wrapper_persisted_keys__';
 const SESSION_KEY_META = '__ngrx_wrapper_persisted_keys__';
+
+const autoBindMetadata = new WeakMap<Function, Type<any>>();
+
+export function AutoBind(): MethodDecorator {
+  return function (target: any, propertyKey: string | symbol, descriptor: PropertyDescriptor) {
+    const originalMethod = descriptor.value;
+    
+    autoBindMetadata.set(originalMethod, target.constructor);
+
+    const wrapperFn = function (this: any, ...args: any[]) {
+      return originalMethod.apply(this, args);
+    };
+
+    autoBindMetadata.set(wrapperFn, target.constructor);
+    
+    Object.defineProperties(wrapperFn, {
+      '__originalFn': {
+        value: originalMethod,
+        enumerable: false,
+        configurable: true,
+        writable: false
+      },
+      '__autoBound': {
+        value: true,
+        enumerable: false,
+        configurable: false
+      },
+      'name': {
+        value: `bound ${originalMethod.name}`,
+        configurable: true
+      }
+    });
+
+    descriptor.value = wrapperFn;
+    return descriptor;
+  };
+}
 
 @Injectable({ providedIn: 'root' })
 export class NgrxStoreWrapperService {
@@ -38,7 +79,17 @@ export class NgrxStoreWrapperService {
   private dynamicActions: Record<string, any> = {};
   private selectors: Record<string, any> = {};
   private persistedKeys: Map<string, StorageType> = new Map();
+  private pollingSubscriptions: Record<string, Subscription> = {};
+  private effectConfigs: Record<string, {
+    intervalMs?: number;
+    immediate?: boolean;
+    transform?: (result: any) => any;
+    originalServiceFn: (...args: any[]) => Observable<any>;
+    context?: any;
+    args?: any;
+  }> = {};
 
+  constructor(private injector: Injector, private http: HttpClient) {}
 
   public initializeStore(store: Store<StoreState>, reducerManager: ReducerManager): void {
     this.store = store;
@@ -135,6 +186,150 @@ export class NgrxStoreWrapperService {
     }
   }
 
+  public addEffect<T = any>(options: {
+    key: string;
+    serviceFn: (...args: any[]) => Observable<T>;
+    context?: any;
+    args?: any;
+    intervalMs?: number;
+    immediate?: boolean;
+    transform?: (result: T) => any;
+  }): void {
+    const {
+      key,
+      serviceFn,
+      context,
+      args,
+      intervalMs,
+      immediate = true,
+      transform
+    } = options;
+  
+    this.removeEffect(key);
+  
+    this.effectConfigs[key] = {
+      intervalMs,
+      immediate,
+      transform,
+      originalServiceFn: serviceFn,
+      context,
+      args
+    };
+  
+    if (immediate) {
+      this.executeEffect(key);
+    }
+ 
+    if (intervalMs !== undefined) {
+      this.pollingSubscriptions[key] = interval(intervalMs)
+        .pipe(
+          startWith(immediate ? null : intervalMs)
+        )
+        .subscribe(() => this.executeEffect(key));
+    }
+  }
+
+  private executeEffect(key: string): void {
+    const config = this.effectConfigs[key];
+    if (!config) return;
+
+    const boundFn = this.autoBind(config.originalServiceFn, config.context);
+    const result$ = Array.isArray(config.args)
+      ? boundFn(...config.args)
+      : boundFn(config.args);
+
+    result$.subscribe({
+      next: result => {
+        const finalValue = config.transform ? config.transform(result) : result;
+        this.set(key, finalValue);
+      },
+      error: err => {
+        console.error(`[ngrx-store-wrapper] Error executing effect for key "${key}":`, err);
+      }
+    });
+  }
+
+  public addHttpEffect<T = any>(options: {
+    key: string;
+    url: string;
+    method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+    body?: any;
+    headers?: Record<string, string>;
+    intervalMs?: number;
+    immediate?: boolean;
+    transform?: (result: T) => any;
+  }): void {
+    const {
+      key,
+      url,
+      method = 'GET',
+      body,
+      headers,
+      intervalMs,
+      immediate = true,
+      transform
+    } = options;
+
+    this.removeEffect(key);
+
+    const httpFn = () =>
+      this.http.request(method, url, {
+        body,
+        headers: new HttpHeaders(headers || {})
+      }).pipe(
+        catchError(err => {
+          console.error(`[ngrx-store-wrapper] HTTP request failed for key "${key}"`, err);
+          return of(null);
+        })
+      );
+
+    this.effectConfigs[key] = {
+      intervalMs,
+      immediate,
+      transform,
+      originalServiceFn: httpFn,
+      context: null,
+      args: undefined
+    };
+
+    const callApiAndDispatch = () => {
+      const config = this.effectConfigs[key];
+      config.originalServiceFn().subscribe(result => {
+        const finalValue = config.transform ? config.transform(result) : result;
+        this.set(key, finalValue);
+      });
+    };
+
+    if (immediate) callApiAndDispatch();
+    if (intervalMs !== undefined) {
+      this.pollingSubscriptions[key] = interval(intervalMs).subscribe(callApiAndDispatch);
+    }
+  }
+
+  public recallEffect<T = any>(key: string, updatedArgs?: any): void {
+    const config = this.effectConfigs[key];
+    if (!config) {
+      if (isDevMode()) {
+        console.warn(`[ngrx-store-wrapper] Cannot recall effect. No config found for key "${key}".`);
+      }
+      return;
+    }
+
+    this.effectConfigs[key].args = updatedArgs ?? config.args;
+    this.executeEffect(key);
+  }
+
+  public removeEffect(key: string): void {
+    if (this.pollingSubscriptions[key]) {
+      this.pollingSubscriptions[key].unsubscribe();
+      delete this.pollingSubscriptions[key];
+    }
+
+    if (this.effectConfigs[key]) {
+      delete this.effectConfigs[key];
+    }
+  }
+
   public remove(key: string): void {
     if (!this.dynamicReducers[key]) return;
 
@@ -142,6 +337,8 @@ export class NgrxStoreWrapperService {
     delete this.dynamicReducers[key];
     delete this.dynamicActions[`set${key}`];
     delete this.selectors[key];
+
+    this.removeEffect(key);
 
     if (this.persistedKeys.has(key)) {
       const type = this.persistedKeys.get(key)!;
@@ -231,5 +428,64 @@ export class NgrxStoreWrapperService {
         }
       }
     });
+  }
+
+  private autoBind(fn: Function, context?: any): (...args: any[]) => Observable<any> {
+    if (typeof fn !== 'function') {
+      throw new Error('[ngrx-store-wrapper] serviceFn must be a function');
+    }
+  
+    // If context is provided, just bind to it
+    if (context) return fn.bind(context);
+  
+    // Check if already bound
+    if (autoBindMetadata.has(fn)) {
+      const ownerClass = autoBindMetadata.get(fn)!;
+      const instance = this.injector.get(ownerClass, null, InjectFlags.Optional);
+      if (instance) return fn.bind(instance);
+    }
+  
+    // Check for wrapped functions
+    const originalFn = (fn as any).__originalFn;
+    if (originalFn && autoBindMetadata.has(originalFn)) {
+      const ownerClass = autoBindMetadata.get(originalFn)!;
+      const instance = this.injector.get(ownerClass, null, InjectFlags.Optional);
+      if (instance) return fn.bind(instance);
+    }
+  
+    // Additional check for bound functions
+    if ((fn as any).__autoBound) {
+      const ownerClass = autoBindMetadata.get(fn);
+      if (ownerClass) {
+        const instance = this.injector.get(ownerClass, null, InjectFlags.Optional);
+        if (instance) return fn.bind(instance);
+      }
+    }
+  
+    // For class methods not decorated with @AutoBind
+    if (fn.name) {
+      try {
+        const classNameMatch = fn.name.match(/^bound (\w+)/);
+        const className = classNameMatch ? classNameMatch[1] : fn.name.split('.').shift();
+        
+        if (className) {
+          const ownerClass = this.findClassByName(className);
+          if (ownerClass) {
+            const instance = this.injector.get(ownerClass, null, InjectFlags.Optional);
+            if (instance) return fn.bind(instance);
+          }
+        }
+      } catch (e) {
+        console.warn('[ngrx-store-wrapper] Auto-bind name parsing failed', e);
+      }
+    }
+  
+    throw new Error('[ngrx-store-wrapper] Failed to auto-bind serviceFn. Use @AutoBind() or provide context.');
+  }
+  
+  private findClassByName(name: string): Type<any> | null {
+    // This is a simplified approach - you might need a more robust solution
+    const classes = (window as any).__ngrx_wrapper_classes__ || [];
+    return classes.find((cls: any) => cls.name === name) || null;
   }
 }
