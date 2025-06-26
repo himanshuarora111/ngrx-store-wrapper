@@ -1,37 +1,14 @@
 # ngrx-store-wrapper
 
-**ngrx-store-wrapper** is a lightweight Angular library for **dynamic NgRx state management**. It allows you to inject reducers and selectors at runtime, enabling powerful, modular, and flexible applications without boilerplate. Ideal for large Angular projects that rely on **NgRx store**.
+A lightweight Angular library for dynamic NgRx state management with zero boilerplate.
 
-## Features
+## Key Features
 
-- **Dynamic State Management**
-  - Create and update store slices at runtime
-  - Automatically generates reducers, actions, and selectors
-  - Handles both static and dynamic reducers
-
-- **Persistence Support**
-  - Persistent storage using localStorage or sessionStorage
-  - Automatic state restoration on application load
-  - Support for both local and session persistence
-  - Easy persistence toggle for store keys
-
-- **Safety Features**
-  - Automatic detection of static reducers
-  - Protection against static reducer overwriting
-  - Dev-mode warnings for resource management
-  - Clear error handling for uninitialized store
-
-- **Resource Management**
-  - Warns when more than 100 dynamic keys are registered
-  - Automatic cleanup of unused reducers
-  - Efficient state observation through selectors
-  - Automatic subscription cleanup when components are destroyed
-  - Automatic cleanup of persisted data when keys are removed
-
-- **Easy Integration**
-  - Singleton service provided in root
-  - Compatible with Angular's standalone components
-  - Simple API surface with set(), get(), remove(), enablePersistence(), and disablePersistence()
+- 🏗️ Dynamic Reducers - Create store slices at runtime
+- ⚡ Effect System - Auto-bound methods, polling, manual triggers
+- 💾 Persistence - localStorage/sessionStorage support
+- 🛡️ Type Safety - Full TypeScript support
+- 🧹 Automatic Cleanup - Subscription & resource management
 
 ## Installation
 
@@ -39,135 +16,180 @@
 npm install ngrx-store-wrapper
 ```
 
-## Usage
+## Compatibility
+The store wrapper auto-initializes itself on first use, thanks to Angular's runInInjectionContext.
+No manual setup needed beyond provideStore() and getInitialDynamicReducers().
 
-### 1. Initialize with ApplicationConfig
+✅ Compatible with Angular 15+ and NgRx 15+
+
+## Quick Start
+
+### 1. Initialize Store
 
 ```typescript
-import { ApplicationConfig, provideZoneChangeDetection } from '@angular/core';
-import { provideStore } from '@ngrx/store';
-import { getInitialDynamicReducers } from 'ngrx-store-wrapper';
-
+// app.config.ts
 export const appConfig: ApplicationConfig = {
   providers: [
-    provideZoneChangeDetection({ eventCoalescing: true }),
     provideStore({
-      ...getInitialDynamicReducers(), 
+      ...getInitialDynamicReducers(),
+      // Optional manually created reducers
+      counter: counterReducer 
     })
   ]
 };
 ```
 
-### 2. Using the Store
+### 2. Basic Usage
 
 ```typescript
-// Import the store wrapper
-import { storeWrapper } from 'ngrx-store-wrapper';
+// Set state
+storeWrapper.set('user', { name: 'Alice' });
 
-// Set a value dynamically
-storeWrapper.set('user', { name: 'Alice', age: 25 });
+// Get typed observable
+interface User {
+  name: string;
+  age?: number;
+}
 
-// Get an observable for the key's data
-storeWrapper.get('user').subscribe(user => {
-  console.log(user);
+storeWrapper.get<User>('user').subscribe(user => {
+  console.log(user.name); // Type-safe access
 });
 
-// Remove a dynamic store slice
-storeWrapper.remove('user');
+// Effects with polling
+storeWrapper.addEffect({
+  key: 'liveData',
+  serviceFn: dataService.fetch,
+  intervalMs: 5000
+});
+```
 
-// Enable persistence for a store key
-storeWrapper.enablePersistence('user', StorageType.Local);
+## Core Concepts
 
-// Disable persistence for a store key
-storeWrapper.disablePersistence('user');
+### Dynamic vs Manually Created Reducers
+
+| Feature | Dynamic Reducers | Manually Created Reducers |
+|---------|------------------|---------------------------|
+| Creation | At runtime via set() | Using NgRx createReducer |
+| Modification | Fully managed | Protected from modification |
+| Use Case | Quick state needs | Complex state logic |
+
+### Persistence
+You can persist selected store keys to localStorage or sessionStorage using:
+
+```typescript
+storeWrapper.enablePersistence('user/settings', StorageType.Local);
+```
+
+- localStorage: Persists even after the browser is closed
+- sessionStorage: Clears when the session ends (safer for sensitive data)
+
+Automatically restores values on app start
+Manual cleanup via disablePersistence()
+
+## Effect System
+
+```typescript
+@Injectable()
+export class UserService {
+  @AutoBind() // Preserves 'this' context
+  getUser(id: string) {
+    return this.http.get(`/users/${id}`);
+  }
+}
+
+// Component
+storeWrapper.addEffect({
+  key: 'user',
+  serviceFn: userService.getUser,
+  args: '123',
+  immediate: false
+});
+
+// Manually trigger later
+storeWrapper.recallEffect('user');
+```
+
+## Best Practices
+
+- Keys - Use consistent naming (e.g., 'feature/entity')
+- Effects - Always clean up in ngOnDestroy
+- Types - Leverage interfaces for complex state
+- Persistence - Prefer sessionStorage for sensitive data
+
+```typescript
+// Good practice example
+interface Settings {
+  theme: 'light'|'dark';
+  fontSize: number;
+}
+
+storeWrapper.enablePersistence('user/settings', StorageType.Local);
+storeWrapper.get<Settings>('user/settings').subscribe(/*...*/);
 ```
 
 ## API Reference
 
-| Method | Description | Return Type | Notes |
-| --- | --- | --- | --- |
-| `set(key: string, value: any)` | Sets or updates data for a dynamic key | `void` | Creates reducer/action/selector automatically |
-| `get<T = any>(key: string)` | Returns observable of state | `Observable<T>` | Returns `{ value: T }` for dynamic keys, raw state for static keys |
-| `remove(key: string)` | Removes dynamic reducer, action, and selector | `void` | Only removes dynamic keys |
-| `enablePersistence(key: string, type: StorageType)` | Enables persistence for a store key | `void` | `type` can be `StorageType.Local` or `StorageType.Session` |
-| `disablePersistence(key: string)` | Disables persistence for a store key | `void` | Removes stored data from persistence |
+### Store Operations
 
-### StorageType Enum
-- `StorageType.Local`: Persists data in localStorage (persists across sessions)
-- `StorageType.Session`: Persists data in sessionStorage (persists only for current session)
+| Method | Description |
+|--------|-------------|
+| set(key, value) | Creates/updates dynamic state |
+| get<T>(key) | Returns typed observable |
+| remove(key) | Cleans up dynamic state |
 
-### State Return Types
-- **Dynamic Keys**: Returns the value directly (e.g., `{ name: 'Alice', age: 25 }`)
-- **Static Keys**: Returns raw state slice directly (e.g., `{ name: 'Alice', age: 25 }`)
+### Effect Methods
 
-**Note**: The library now returns the actual value directly without wrapping it in a payload object. This means users get the exact data they set without any additional wrapping.
+| Method | Description |
+|--------|-------------|
+| addEffect(config) | Creates managed effect |
+| recallEffect(key) | Triggers effect |
+| removeEffect(key) | Cleans up effect |
 
-## Key Concepts
+## Working with Manually Created Reducers
 
-### getInitialDynamicReducers()
-This function is essential for initializing the dynamic store system. It:
-1. Sets up the initial state structure
-2. Creates the necessary reducer configuration
-3. Enables dynamic reducer registration
-4. Detects static reducers from the initial state
+For cases where you need more control than dynamic reducers provide:
 
-### Store State Structure
-The store state is a simple object with string keys:
+Create a traditional NgRx reducer:
 
 ```typescript
-interface StoreState {
-  [key: string]: any;
-}
+// counter.reducer.ts
+const increment = createAction('[Counter] Increment');
+export const counterReducer = createReducer(
+  0,
+  on(increment, (state) => state + 1)
+);
 ```
 
-### Dynamic vs Static Reducers
-- **Static Reducers**: Automatically detected from initial store state
-- **Dynamic Reducers**: Created at runtime for new keys
-- **Protection**: Attempts to modify static reducers are ignored in dev mode
+Initialize with your store:
 
-### Internal Implementation
-
-1. **Reducers**: Created automatically using `createReducer` from NgRx
-2. **Actions**: Generated with `createAction` for each key
-3. **Selectors**: Created using `createSelector` for efficient state observation
-4. **State Structure**: Dynamic state is wrapped in `{ value: T }` structure
-
-## Best Practices
-
-1. **Initialization**
-   - Always initialize store with `getInitialDynamicReducers()`
-   - Use `storeWrapper` for all store operations
-
-2. **Resource Management**
-   - Clean up unused dynamic keys with `remove()`
-   - Be cautious of creating more than 100 dynamic keys
-   - Remove reducers when components are destroyed
-   - Clean up persisted data when it's no longer needed
-
-3. **State Management**
-   - Use meaningful, unique keys
-   - Consider prefixing keys in large applications
-   - Handle Observable errors in subscriptions
-   - Use `enablePersistence()` for data that needs to persist across sessions
-
-4. **Persistence Usage**
-   - Use `StorageType.Local` for data that should persist across browser sessions
-   - Use `StorageType.Session` for data that should only persist during current session
-   - Remember to call `disablePersistence()` when data should no longer be persisted
-
-## Development
-
-To build the library:
-
-```bash
-ng build ngrx-store-wrapper
+```typescript
+provideStore({
+  counter: counterReducer, // Manually created
+  ...getInitialDynamicReducers() // Dynamic
+})
 ```
 
-To run tests:
+Key differences:
 
-```bash
-ng test ngrx-store-wrapper
-```
+Manually created reducers:
+- Use NgRx actions for updates
+- Protected from set() operations
+- Better for complex state logic
+
+Dynamic reducers:
+- Updated via set()
+- Perfect for simple state needs
+- Automatic action/reducer generation
+
+## Documentation
+
+For more detailed information, check out our [documentation](./docs/index.md).
+
+## Useful Links
+
+- 🚀 [Live Demo](https://ngrx-store-helper.vercel.app/) - Try it out!
+- 📚 [Usage Examples](https://github.com/himanshuarora111/ngrx-store-helper) - See it in action
+- 🛠️ [Source Code](https://github.com/himanshuarora111/ngrx-store-wrapper) - Explore the library
 
 ## License
 
