@@ -1,6 +1,6 @@
 {
   "name": "ngrx-store-wrapper",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Lightweight Angular NgRx dynamic store manager library for easy dynamic slice handling",
   "author": "Himanshu Arora",
   "license": "MIT",
