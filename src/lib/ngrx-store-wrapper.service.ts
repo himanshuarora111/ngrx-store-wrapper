@@ -17,8 +17,7 @@ import {
   inject,
   DestroyRef,
   Injector,
-  Type,
-  InjectFlags
+  Type
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { StorageType } from './storage-type.enum';
@@ -434,34 +433,34 @@ export class NgrxStoreWrapperService {
     if (typeof fn !== 'function') {
       throw new Error('[ngrx-store-wrapper] serviceFn must be a function');
     }
-  
+
     // If context is provided, just bind to it
     if (context) return fn.bind(context);
-  
+
     // Check if already bound
     if (autoBindMetadata.has(fn)) {
       const ownerClass = autoBindMetadata.get(fn)!;
-      const instance = this.injector.get(ownerClass, null, InjectFlags.Optional);
+      const instance = this.injector.get(ownerClass, { optional: true });
       if (instance) return fn.bind(instance);
     }
-  
+
     // Check for wrapped functions
     const originalFn = (fn as any).__originalFn;
     if (originalFn && autoBindMetadata.has(originalFn)) {
       const ownerClass = autoBindMetadata.get(originalFn)!;
-      const instance = this.injector.get(ownerClass, null, InjectFlags.Optional);
+      const instance = this.injector.get(ownerClass, { optional: true });
       if (instance) return fn.bind(instance);
     }
-  
+
     // Additional check for bound functions
     if ((fn as any).__autoBound) {
       const ownerClass = autoBindMetadata.get(fn);
       if (ownerClass) {
-        const instance = this.injector.get(ownerClass, null, InjectFlags.Optional);
+        const instance = this.injector.get(ownerClass, { optional: true });
         if (instance) return fn.bind(instance);
       }
     }
-  
+
     // For class methods not decorated with @AutoBind
     if (fn.name) {
       try {
@@ -471,7 +470,7 @@ export class NgrxStoreWrapperService {
         if (className) {
           const ownerClass = this.findClassByName(className);
           if (ownerClass) {
-            const instance = this.injector.get(ownerClass, null, InjectFlags.Optional);
+            const instance = this.injector.get(ownerClass, { optional: true });
             if (instance) return fn.bind(instance);
           }
         }
@@ -479,7 +478,7 @@ export class NgrxStoreWrapperService {
         console.warn('[ngrx-store-wrapper] Auto-bind name parsing failed', e);
       }
     }
-  
+
     throw new Error('[ngrx-store-wrapper] Failed to auto-bind serviceFn. Use @AutoBind() or provide context.');
   }
   
