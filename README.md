@@ -1,6 +1,6 @@
 # ngrx-store-wrapper
 
-A lightweight Angular library for dynamic NgRx state management with zero boilerplate.
+A lightweight Angular library that lets you manage NgRx store state without writing actions, reducers, or effects manually, with built-in support for syncing to session and local storage.
 
 ## Key Features
 
@@ -144,6 +144,13 @@ storeWrapper.get<Settings>('user/settings').subscribe(/*...*/);
 | addEffect(config) | Creates managed effect |
 | recallEffect(key) | Triggers effect |
 | removeEffect(key) | Cleans up effect |
+
+### Persistence Functions
+
+| Method | Description |
+|--------|-------------|
+| enablePersistence(key, storageType) | Enables persistence for a store key using the specified storage type (Local/Session) |
+| disablePersistence(key) | Disables persistence for a store key |
 
 ## Working with Manually Created Reducers
 
