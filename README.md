@@ -20,7 +20,12 @@ npm install ngrx-store-wrapper
 The store wrapper auto-initializes itself on first use, thanks to Angular's runInInjectionContext.
 No manual setup needed beyond provideStore() and getInitialDynamicReducers().
 
+### Angular & NgRx Compatibility:
+
 ✅ Compatible with Angular 15+ and NgRx 15+
+
+- Although peerDependencies previously targeted Angular 19+, the library is tested with Angular 16.2.0 and NgRx 16.2.0.
+- Expected to remain compatible through Angular 20.
 
 ## Quick Start
 
@@ -197,6 +202,7 @@ For more detailed information, check out our [documentation](./docs/index.md).
 - 🚀 [Live Demo](https://ngrx-store-helper.vercel.app/) - Try it out!
 - 📚 [Usage Examples](https://github.com/himanshuarora111/ngrx-store-helper) - See it in action
 - 🛠️ [Source Code](https://github.com/himanshuarora111/ngrx-store-wrapper) - Explore the library
+- 💡 [Feature Requests](https://github.com/himanshuarora111/ngrx-store-wrapper/issues/new?template=feature_request.md) - Have an idea? Let us know by creating an issue!
 
 ## License
 

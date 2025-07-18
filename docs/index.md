@@ -3,6 +3,7 @@
 ## 📖 Table of Contents
 - [Introduction](#introduction)
 - [Installation & Setup](#installation--setup)
+- [Compatibility](#compatibility)
 - [Core Concepts](#core-concepts)
   - [Dynamic vs. Manually Created Reducers](#dynamic-vs-manually-created-reducers)
   - [State Persistence](#state-persistence)
@@ -59,6 +60,13 @@ Ideal for:
 - Rapid prototyping
 - Apps with dynamic state needs
 - Teams reducing NgRx complexity
+
+## 🔍 Compatibility
+
+✅ Compatible with Angular 15+ and NgRx 15+
+
+- Although peerDependencies previously targeted Angular 19+, the library is tested with Angular 16.2.0 and NgRx 16.2.0.
+- Expected to remain compatible through Angular 20.
 
 ## 🔧 Installation & Setup
 
