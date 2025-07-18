@@ -9,16 +9,18 @@ import {
   createSelector,
   select
 } from '@ngrx/store';
-import { Observable, interval, Subscription, of } from 'rxjs';
-import { take, catchError, startWith } from 'rxjs/operators';
+import { Observable, interval, Subscription, of, firstValueFrom } from 'rxjs';
+import { take, catchError, startWith, finalize } from 'rxjs/operators';
 import {
   isDevMode,
   Injectable,
   inject,
   DestroyRef,
   Injector,
-  Type
+  Type,
+  NgZone
 } from '@angular/core';
+import { DevToolsService } from './devtools.service';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { StorageType } from './storage-type.enum';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
@@ -88,9 +90,23 @@ export class NgrxStoreWrapperService {
     args?: any;
   }> = {};
 
-  constructor(private injector: Injector, private http: HttpClient) {}
+  private isInitialized = false;
+
+  constructor(
+    private injector: Injector, 
+    private http: HttpClient,
+    private devTools: DevToolsService,
+    private ngZone: NgZone
+  ) {}
+
+  private ensureInitialized(): void {
+    if (!this.isInitialized) {
+      throw new Error('Store must be initialized before use. Call initializeStore() first.');
+    }
+  }
 
   public initializeStore(store: Store<StoreState>, reducerManager: ReducerManager): void {
+    this.isInitialized = true;
     this.store = store;
     this.reducerManager = reducerManager;
 
@@ -107,53 +123,75 @@ export class NgrxStoreWrapperService {
   }
 
   public set(key: string, value: any): void {
-    if (!this.store) {
-      throw new Error('Store must be initialized before setting data');
+    // 1. Initialization check
+    this.ensureInitialized();
+  
+    if (typeof key !== 'string') {
+      throw new Error('Key must be a string');
     }
-
+  
+    // 2. Static key protection
     if (this.staticReducerKeys.has(key)) {
       if (isDevMode()) {
-        console.warn(
-          `[ngrx-store-wrapper] Attempted to set value for static reducer key: "${key}". This operation is ignored.`
-        );
+        console.warn(`[ngrx-store-wrapper] Attempted to set static reducer key: "${key}"`);
       }
       return;
     }
-
-    if (!this.dynamicActions[`set${key}`]) {
-      this.dynamicActions[`set${key}`] = createAction(`[${key}] Set`, (value: any) => ({ value }));
-    }
-
-    if (!this.dynamicReducers[key]) {
-      const reducer = createReducer(
-        null,
-        on(this.dynamicActions[`set${key}`], (_state, { value }: { value: any }) => value)
+  
+    const actionKey = `set${key}`; // Backward-compatible action key
+  
+    // 3. Lazy initialization
+    if (!this.dynamicActions[actionKey]) {
+      // Action setup (original format)
+      this.dynamicActions[actionKey] = createAction(
+        `[${key}] Set`, 
+        (value: any) => ({ value }) // No metadata
       );
-
-      this.reducerManager.addReducer(key, reducer);
-      this.dynamicReducers[key] = reducer;
-
+  
+      // Reducer with null initialization + DevTools
+      this.dynamicReducers[key] = createReducer(
+        null, // Optimized initialization
+        on(this.dynamicActions[actionKey], (state, { value }) => {
+          // Skip no-op updates
+          if (state === value) return state;
+          
+          // DevTools logging (inside NgZone)
+          this.ngZone.run(() => {
+            this.devTools.logAction('SET', key, {
+              value,
+              previous: state,
+              timestamp: new Date().toISOString()
+            });
+          });
+          return value;
+        }
+      ));
+  
+      // Register reducer
+      this.reducerManager.addReducer(key, this.dynamicReducers[key]);
       if (isDevMode() && Object.keys(this.dynamicReducers).length > DYNAMIC_KEY_WARN_THRESHOLD) {
         console.warn(
           `[ngrx-store-wrapper] More than ${DYNAMIC_KEY_WARN_THRESHOLD} dynamic store keys registered.`
         );
       }
-    }
-
-    if (!this.selectors[key]) {
+      // Selector setup
       this.selectors[key] = createSelector(
-        (state: StoreState) => state[key],
-        (state: any) => state
+        (state: any) => state[key],
+        val => val
       );
-    }
-
-    const action = this.dynamicActions[`set${key}`];
-    this.store.dispatch(action(value));
-
+    } 
+    this.store.dispatch(this.dynamicActions[actionKey](value));
+  
     if (this.persistedKeys.has(key)) {
       const type = this.persistedKeys.get(key)!;
       const storage = type === StorageType.Local ? localStorage : sessionStorage;
-      storage.setItem(key, JSON.stringify(value));
+      this.ngZone.runOutsideAngular(() => {
+        try {
+          storage.setItem(key, JSON.stringify(value));
+        } catch (e) {
+          console.error('Storage write failed', e);
+        }
+      });
     }
   }
 
@@ -194,6 +232,13 @@ export class NgrxStoreWrapperService {
     immediate?: boolean;
     transform?: (result: T) => any;
   }): void {
+    // Log effect addition to DevTools outside Angular zone
+    this.ngZone.runOutsideAngular(() => {
+      this.devTools.logAction('EFFECT_ADD', options.key, {
+        hasInterval: !!options.intervalMs,
+        immediate: options.immediate !== false
+      }, true);
+    });
     const {
       key,
       serviceFn,
@@ -232,18 +277,30 @@ export class NgrxStoreWrapperService {
     const config = this.effectConfigs[key];
     if (!config) return;
 
-    const boundFn = this.autoBind(config.originalServiceFn, config.context);
-    const result$ = Array.isArray(config.args)
-      ? boundFn(...config.args)
-      : boundFn(config.args);
+    const { originalServiceFn, context, args, transform } = config;
+    const boundFn = this.autoBind(originalServiceFn, context);
 
-    result$.subscribe({
-      next: result => {
-        const finalValue = config.transform ? config.transform(result) : result;
-        this.set(key, finalValue);
+    boundFn(args).pipe(
+      take(1),
+      catchError(error => {
+        console.error(`[ngrx-store-wrapper] Error in effect for key "${key}":`, error);
+        return of(null);
+      })
+    ).subscribe({
+      next: (result: any) => {
+        if (result === null || result === undefined) return;
+        
+        const finalValue = transform ? transform(result) : result;
+        // Run set inside Angular zone since it updates the store
+        this.ngZone.run(() => {
+          this.set(key, finalValue);
+        });
       },
-      error: err => {
-        console.error(`[ngrx-store-wrapper] Error executing effect for key "${key}":`, err);
+      error: (err) => {
+        // Log error outside Angular zone to prevent unnecessary change detection
+        this.ngZone.runOutsideAngular(() => {
+          console.error(`[ngrx-store-wrapper] Error in effect for key "${key}":`, err);
+        });
       }
     });
   }
@@ -293,28 +350,59 @@ export class NgrxStoreWrapperService {
 
     const callApiAndDispatch = () => {
       const config = this.effectConfigs[key];
-      config.originalServiceFn().subscribe(result => {
-        const finalValue = config.transform ? config.transform(result) : result;
-        this.set(key, finalValue);
-      });
+      if (!config) return;
+      
+      const subscription = config.originalServiceFn()
+        .pipe(
+          take(1),
+          finalize(() => subscription?.unsubscribe())
+        )
+        .subscribe({
+          next: result => {
+            const finalValue = config.transform ? config.transform(result) : result;
+            this.set(key, finalValue);
+          },
+          error: err => {
+            console.error(`[ngrx-store-wrapper] Error in HTTP effect for key "${key}":`, err);
+          }
+        });
     };
 
     if (immediate) callApiAndDispatch();
     if (intervalMs !== undefined) {
-      this.pollingSubscriptions[key] = interval(intervalMs).subscribe(callApiAndDispatch);
+      // Clean up any existing subscription
+      this.removeEffect(key);
+      
+      const subscription = interval(intervalMs)
+        .pipe(
+          finalize(() => subscription?.unsubscribe())
+        )
+        .subscribe(() => callApiAndDispatch());
+      
+      this.pollingSubscriptions[key] = subscription;
     }
   }
 
   public recallEffect<T = any>(key: string, updatedArgs?: any): void {
-    const config = this.effectConfigs[key];
-    if (!config) {
-      if (isDevMode()) {
-        console.warn(`[ngrx-store-wrapper] Cannot recall effect. No config found for key "${key}".`);
-      }
+    this.ensureInitialized();
+
+    const effect = this.effectConfigs[key];
+    if (!effect) {
+      console.warn(`No effect found with key: ${key}`);
       return;
     }
 
-    this.effectConfigs[key].args = updatedArgs ?? config.args;
+    // Update args if provided
+    if (updatedArgs !== undefined) {
+      effect.args = updatedArgs;
+    }
+
+    // Log effect recall to DevTools
+    this.devTools.logAction('EFFECT_RECALL', key, {
+      hasUpdatedArgs: updatedArgs !== undefined,
+      args: updatedArgs
+    });
+
     this.executeEffect(key);
   }
 
@@ -329,22 +417,25 @@ export class NgrxStoreWrapperService {
     }
   }
 
-  public remove(key: string): void {
-    if (!this.dynamicReducers[key]) return;
+  public async remove(key: string): Promise<void> {
+    this.ensureInitialized();
 
-    this.reducerManager.removeReducer(key);
-    delete this.dynamicReducers[key];
-    delete this.dynamicActions[`set${key}`];
-    delete this.selectors[key];
+    if (this.dynamicReducers[key]) {
+      // Get current state before removal for DevTools
+      const currentState = await firstValueFrom(
+        this.store.select(state => state[key]).pipe(take(1))
+      );
+      
+      delete this.dynamicReducers[key];
+      delete this.dynamicActions[key];
+      delete this.selectors[key];
+      this.reducerManager.removeReducer(key);
 
-    this.removeEffect(key);
-
-    if (this.persistedKeys.has(key)) {
-      const type = this.persistedKeys.get(key)!;
-      const storage = type === StorageType.Local ? localStorage : sessionStorage;
-      storage.removeItem(key);
-      this.persistedKeys.delete(key);
-      this.savePersistedKeys();
+      // Log to DevTools
+      this.devTools.logAction('REMOVE', key, {
+        caller: 'remove',
+        timestamp: new Date().toISOString()
+      }, true);
     }
   }
 
@@ -429,7 +520,10 @@ export class NgrxStoreWrapperService {
     });
   }
 
-  private autoBind(fn: Function, context?: any): (...args: any[]) => Observable<any> {
+  private autoBind(fn: Function | null, context?: any): (...args: any[]) => Observable<any> {
+    if (fn === null) {
+      throw new Error('[ngrx-store-wrapper] serviceFn cannot be null');
+    }
     if (typeof fn !== 'function') {
       throw new Error('[ngrx-store-wrapper] serviceFn must be a function');
     }
