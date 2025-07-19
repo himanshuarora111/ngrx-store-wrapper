@@ -10,7 +10,7 @@ import {
   select
 } from '@ngrx/store';
 import { Observable, interval, Subscription, of } from 'rxjs';
-import { take, catchError, startWith } from 'rxjs/operators';
+import { take, catchError, startWith, finalize } from 'rxjs/operators';
 import {
   isDevMode,
   Injectable,
@@ -111,45 +111,45 @@ export class NgrxStoreWrapperService {
       throw new Error('Store must be initialized before setting data');
     }
 
+    if (typeof key !== 'string') {
+      throw new Error('Key must be a string');
+    }
+  
     if (this.staticReducerKeys.has(key)) {
       if (isDevMode()) {
-        console.warn(
-          `[ngrx-store-wrapper] Attempted to set value for static reducer key: "${key}". This operation is ignored.`
-        );
+        console.warn(`[ngrx-store-wrapper] Attempted to set static reducer key: "${key}"`);
       }
       return;
     }
-
-    if (!this.dynamicActions[`set${key}`]) {
-      this.dynamicActions[`set${key}`] = createAction(`[${key}] Set`, (value: any) => ({ value }));
-    }
-
-    if (!this.dynamicReducers[key]) {
-      const reducer = createReducer(
-        null,
-        on(this.dynamicActions[`set${key}`], (_state, { value }: { value: any }) => value)
+  
+    const actionKey = `set${key}`;
+  
+    if (!this.dynamicActions[actionKey]) {
+      this.dynamicActions[actionKey] = createAction(
+        `[${key}] Set`, 
+        (value: any) => ({ value })
       );
-
-      this.reducerManager.addReducer(key, reducer);
-      this.dynamicReducers[key] = reducer;
-
+      this.dynamicReducers[key] = createReducer(
+        null, 
+        on(this.dynamicActions[actionKey], (state, { value }) => {
+          if (state === value) return state;
+          return value;
+        }
+      ));
+  
+      this.reducerManager.addReducer(key, this.dynamicReducers[key]);
       if (isDevMode() && Object.keys(this.dynamicReducers).length > DYNAMIC_KEY_WARN_THRESHOLD) {
         console.warn(
           `[ngrx-store-wrapper] More than ${DYNAMIC_KEY_WARN_THRESHOLD} dynamic store keys registered.`
         );
       }
-    }
-
-    if (!this.selectors[key]) {
       this.selectors[key] = createSelector(
-        (state: StoreState) => state[key],
-        (state: any) => state
+        (state: any) => state[key],
+        val => val
       );
-    }
-
-    const action = this.dynamicActions[`set${key}`];
-    this.store.dispatch(action(value));
-
+    } 
+    this.store.dispatch(this.dynamicActions[actionKey](value));
+  
     if (this.persistedKeys.has(key)) {
       const type = this.persistedKeys.get(key)!;
       const storage = type === StorageType.Local ? localStorage : sessionStorage;
@@ -233,20 +233,27 @@ export class NgrxStoreWrapperService {
     if (!config) return;
 
     const boundFn = this.autoBind(config.originalServiceFn, config.context);
-    const result$ = Array.isArray(config.args)
+    const result$ = (Array.isArray(config.args)
       ? boundFn(...config.args)
-      : boundFn(config.args);
+      : boundFn(config.args)
+    ).pipe(
+      catchError(error => {
+        console.error(`[ngrx-store-wrapper] Error in effect for key "${key}":`, error);
+        return of(null); // Continue stream with null
+      })
+    );
 
     result$.subscribe({
       next: result => {
+        if (result === null || result === undefined) return;
         const finalValue = config.transform ? config.transform(result) : result;
         this.set(key, finalValue);
       },
       error: err => {
-        console.error(`[ngrx-store-wrapper] Error executing effect for key "${key}":`, err);
+        console.error(`[ngrx-store-wrapper] Post-catch error for key "${key}":`, err);
       }
     });
-  }
+}
 
   public addHttpEffect<T = any>(options: {
     key: string;
@@ -293,15 +300,35 @@ export class NgrxStoreWrapperService {
 
     const callApiAndDispatch = () => {
       const config = this.effectConfigs[key];
-      config.originalServiceFn().subscribe(result => {
-        const finalValue = config.transform ? config.transform(result) : result;
-        this.set(key, finalValue);
-      });
+      if (!config) return;
+      
+      const subscription = config.originalServiceFn()
+        .pipe(
+          take(1),
+          finalize(() => subscription?.unsubscribe())
+        )
+        .subscribe({
+          next: result => {
+            const finalValue = config.transform ? config.transform(result) : result;
+            this.set(key, finalValue);
+          },
+          error: err => {
+            console.error(`[ngrx-store-wrapper] Error in HTTP effect for key "${key}":`, err);
+          }
+        });
     };
 
     if (immediate) callApiAndDispatch();
     if (intervalMs !== undefined) {
-      this.pollingSubscriptions[key] = interval(intervalMs).subscribe(callApiAndDispatch);
+      this.removeEffect(key);
+      
+      const subscription = interval(intervalMs)
+        .pipe(
+          finalize(() => subscription?.unsubscribe())
+        )
+        .subscribe(() => callApiAndDispatch());
+      
+      this.pollingSubscriptions[key] = subscription;
     }
   }
 
@@ -314,7 +341,10 @@ export class NgrxStoreWrapperService {
       return;
     }
 
-    this.effectConfigs[key].args = updatedArgs ?? config.args;
+    if (updatedArgs !== undefined) {
+      config.args = updatedArgs;
+    }
+
     this.executeEffect(key);
   }
 
