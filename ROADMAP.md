@@ -54,5 +54,3 @@ Contributions are welcome! Please follow these steps:
 2. Create a feature branch
 3. Make your changes
 4. Submit a pull request
-
-Please ensure all tests pass and add new tests for any new features or bug fixes.
