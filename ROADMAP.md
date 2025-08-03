@@ -130,8 +130,9 @@ This document outlines the planned features and improvements for the NgRx Store 
 - **Persistence Not Triggered for Reducers Called Using Traditional Way**  
   Fixed: Persistence now works with all state updates, including those made through direct store dispatches.
 
-- **Cannot Use `get()` on Manually Created Keys**  
-  Fixed: `storeWrapper.get()` now throws a clear error when used with keys that haven't been created using `set()`.
+- **Enhanced `get()` Functionality**  
+  - `storeWrapper.get()` now throws a clear error when used with string keys that haven't been created using `set()`. The error message includes guidance to call `set(key, value)` first or check for typos.
+  - Added support for passing custom NgRx selectors directly to `get()`, allowing for more flexible state access patterns while maintaining type safety.
 
 ## Contribution Guidelines
 
