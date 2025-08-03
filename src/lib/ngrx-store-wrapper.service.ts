@@ -392,13 +392,20 @@ export class NgrxStoreWrapperService {
     }
   
     const storage = type === StorageType.Local ? localStorage : sessionStorage;
-  
-    // 2. Warn if overwriting existing storage
-    if (storage.getItem(key) !== null && isDevMode()) {
-      console.warn(
-        `[ngrx-store-wrapper] Overwriting existing value for "${key}" in ` +
-        `${type === StorageType.Local ? 'localStorage' : 'sessionStorage'}`
-      );
+    if(this.persistedKeys.has(key)) {
+      if(this.persistedKeys.get(key) === type) {
+        if(isDevMode()) {
+          console.warn(`[ngrx-store-wrapper] Key "${key}" is already persisted.`);
+        }
+        return;
+      }
+      else{
+        console.warn(
+          `[ngrx-store-wrapper] Overwriting existing value for "${key}" in ` +
+          `${type === StorageType.Local ? 'localStorage' : 'sessionStorage'}`
+        );
+        this.disablePersistence(key);
+      }
     }
   
     // 3. Persist current value (using existing selector)
