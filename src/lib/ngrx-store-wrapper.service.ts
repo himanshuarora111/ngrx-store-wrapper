@@ -10,8 +10,8 @@ import {
   select,
   Selector
 } from '@ngrx/store';
-import { Observable, interval, Subscription, of } from 'rxjs';
-import { take, catchError, startWith, distinctUntilChanged, debounceTime, filter, map } from 'rxjs/operators';
+import { Observable, interval, Subscription, of, throwError } from 'rxjs';
+import { take, catchError, startWith, distinctUntilChanged, debounceTime, filter, map, timeout } from 'rxjs/operators';
 import {
   isDevMode,
   Injectable,
@@ -184,6 +184,7 @@ export class NgrxStoreWrapperService {
     this.pendingKeys.delete(key);
     this.readyKeys.add(key);
   }
+  private warnedKeys = new Set<string>();
 
   public get<T = any>(key: string): Observable<T>;
   public get<State, T>(selector: Selector<State, T>): Observable<T>;
@@ -194,9 +195,16 @@ export class NgrxStoreWrapperService {
     let selector;
     if(typeof identifier === 'string') {
       if (!this.pendingKeys.has(identifier) && !this.readyKeys.has(identifier)) {
-        throw new Error(
-          `Key "${identifier}" not created in store. ` +
-          `Call set("${identifier}", value) first or check for typos.`
+        return this.store.pipe(
+          select(state => state[identifier]),
+          filter(val => val !== undefined), // Wait until value exists
+          take(1),
+          timeout({
+            each: 5000,
+            with: () => throwError(() => 
+              new Error(`Key "${identifier}" not found after waiting. Did you call set() first?`))
+          }),
+          map(val => val as T)
         );
       }
       if(this.pendingKeys.has(identifier)) {
@@ -216,11 +224,12 @@ export class NgrxStoreWrapperService {
       const destroyRef = inject(DestroyRef);
       return observable$.pipe(takeUntilDestroyed(destroyRef));
     } catch {
-      if (isDevMode()) {
+      if (isDevMode() && !this.warnedKeys.has(identifier as string)) {
         console.warn(
           `[ngrx-store-wrapper] Auto-unsubscribe only works in components/services. ` +
             `You're using 'get("${identifier}")' outside an Angular injection context.`
         );
+        this.warnedKeys.add(identifier as string);  
       }
       return observable$;
     }
@@ -499,8 +508,8 @@ export class NgrxStoreWrapperService {
     this.persistenceSubscriptions.delete(key);
   
     // Update persistence state
-    this.persistedKeys.delete(key);
     this.updatePersistedKeysMeta(key, null);
+    this.persistedKeys.delete(key);
   
     if (isDevMode()) {
       console.log(`[ngrx-store-wrapper] Disabled persistence for key: "${key}"`);
