@@ -22,9 +22,6 @@ This document outlines the planned features and improvements for the NgRx Store 
 - **Persistence for Manual Reducers**  
   Allow users to register persistence for reducers created outside the library.
 
-- **API for Manual Reducers**  
-  Extend library API to enable `get()` and `set()` on manually created reducers/actions.
-
 - **AutoBind Simplification**  
   Simplify the auto-binding logic to reduce complexity:
     - Consider using a streamlined approach based on standard `AutoBind()` decorators.
