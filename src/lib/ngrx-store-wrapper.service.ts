@@ -7,7 +7,8 @@ import {
   ActionReducerMap,
   ReducerManager,
   createSelector,
-  select
+  select,
+  Selector
 } from '@ngrx/store';
 import { Observable, interval, Subscription, of } from 'rxjs';
 import { take, catchError, startWith, distinctUntilChanged, debounceTime } from 'rxjs/operators';
@@ -170,19 +171,24 @@ export class NgrxStoreWrapperService {
     this.store.dispatch(this.dynamicActions[actionKey](value));
   }
 
-  public get<T = any>(key: string): Observable<T> {
+  public get<T = any>(key: string): Observable<T>;
+  public get<State, T>(selector: Selector<State, T>): Observable<T>;
+  public get<State, T>(identifier: string | Selector<State, T>): Observable<T> {
     if (!this.store) {
       throw new Error('Store must be initialized before getting data');
     }
-
-    if (!(key in this.dynamicReducers)) {
-      throw new Error(
-        `Key "${key}" not created in store. ` +
-        `Call set("${key}", value) first or check for typos.`
-      );
+    let selector;
+    if(typeof identifier === 'string') {
+      if (!(identifier in this.dynamicReducers)) {
+        throw new Error(
+          `Key "${identifier}" not created in store. ` +
+          `Call set("${identifier}", value) first or check for typos.`
+        );
+      }
+      selector = this.selectors[identifier];
     }
-
-    const observable$ = this.store.pipe(select(this.selectors[key]));
+    else selector = identifier;
+    const observable$ = this.store.pipe(select(selector));
 
     try {
       const destroyRef = inject(DestroyRef);
@@ -191,7 +197,7 @@ export class NgrxStoreWrapperService {
       if (isDevMode()) {
         console.warn(
           `[ngrx-store-wrapper] Auto-unsubscribe only works in components/services. ` +
-            `You're using 'get("${key}")' outside an Angular injection context.`
+            `You're using 'get("${identifier}")' outside an Angular injection context.`
         );
       }
       return observable$;
