@@ -11,7 +11,7 @@ import {
   Selector
 } from '@ngrx/store';
 import { Observable, interval, Subscription, of } from 'rxjs';
-import { take, catchError, startWith, distinctUntilChanged, debounceTime } from 'rxjs/operators';
+import { take, catchError, startWith, distinctUntilChanged, debounceTime, filter, map } from 'rxjs/operators';
 import {
   isDevMode,
   Injectable,
@@ -90,6 +90,9 @@ export class NgrxStoreWrapperService {
     args?: any;
   }> = {};
 
+  private pendingKeys = new Set<string>();  // Keys being set
+  private readyKeys = new Set<string>();    // Keys fully ready
+
   constructor(private injector: Injector, private http: HttpClient) {
     // Set up cleanup on destroy
     const destroyRef = inject(DestroyRef);
@@ -123,11 +126,14 @@ export class NgrxStoreWrapperService {
   }
 
   public set(key: string, value: any): void {
+    this.pendingKeys.add(key);
     if (!this.store) {
+      this.pendingKeys.delete(key);
       throw new Error('Store must be initialized before setting data');
     }
 
     if (typeof key !== 'string') {
+      this.pendingKeys.delete(key);
       throw new Error('Key must be a string');
     }
 
@@ -136,6 +142,7 @@ export class NgrxStoreWrapperService {
     }
 
     if (this.staticReducerKeys.has(key)) {
+      this.pendingKeys.delete(key);
       if (isDevMode()) {
         console.warn(`[ngrx-store-wrapper] Attempted to set static reducer key: "${key}"`);
       }
@@ -157,7 +164,12 @@ export class NgrxStoreWrapperService {
         }
       ));
   
-      this.reducerManager.addReducer(key, this.dynamicReducers[key]);
+      try {
+        this.reducerManager.addReducer(key, this.dynamicReducers[key]);
+      } catch (e) {
+        this.pendingKeys.delete(key);
+        throw e;
+      }
       if (isDevMode() && Object.keys(this.dynamicReducers).length > DYNAMIC_KEY_WARN_THRESHOLD) {
         console.warn(
           `[ngrx-store-wrapper] More than ${DYNAMIC_KEY_WARN_THRESHOLD} dynamic store keys registered.`
@@ -169,6 +181,8 @@ export class NgrxStoreWrapperService {
       );
     } 
     this.store.dispatch(this.dynamicActions[actionKey](value));
+    this.pendingKeys.delete(key);
+    this.readyKeys.add(key);
   }
 
   public get<T = any>(key: string): Observable<T>;
@@ -179,10 +193,18 @@ export class NgrxStoreWrapperService {
     }
     let selector;
     if(typeof identifier === 'string') {
-      if (!(identifier in this.dynamicReducers)) {
+      if (!this.pendingKeys.has(identifier) && !this.readyKeys.has(identifier)) {
         throw new Error(
           `Key "${identifier}" not created in store. ` +
           `Call set("${identifier}", value) first or check for typos.`
+        );
+      }
+      if(this.pendingKeys.has(identifier)) {
+        return this.store.pipe(
+          select(state => state[identifier]),
+          filter(val => val !== undefined), // Wait for value
+          take(1),
+          map(val => val as T) // Type assertion
         );
       }
       selector = this.selectors[identifier];
@@ -384,6 +406,8 @@ export class NgrxStoreWrapperService {
     delete this.effectConfigs[key];
 
     this.removeEffect(key);
+    this.pendingKeys.delete(key);
+    this.readyKeys.delete(key);
 
     if (this.persistedKeys.has(key)) this.disablePersistence(key);
   }
