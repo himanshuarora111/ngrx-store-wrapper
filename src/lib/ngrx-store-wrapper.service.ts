@@ -7,10 +7,11 @@ import {
   ActionReducerMap,
   ReducerManager,
   createSelector,
-  select
+  select,
+  Selector
 } from '@ngrx/store';
-import { Observable, interval, Subscription, of } from 'rxjs';
-import { take, catchError, startWith, finalize } from 'rxjs/operators';
+import { Observable, interval, Subscription, of, throwError } from 'rxjs';
+import { take, catchError, startWith, distinctUntilChanged, debounceTime, filter, map, timeout } from 'rxjs/operators';
 import {
   isDevMode,
   Injectable,
@@ -79,6 +80,7 @@ export class NgrxStoreWrapperService {
   private selectors: Record<string, any> = {};
   private persistedKeys: Map<string, StorageType> = new Map();
   private pollingSubscriptions: Record<string, Subscription> = {};
+  private persistenceSubscriptions: Map<string, Subscription> = new Map();
   private effectConfigs: Record<string, {
     intervalMs?: number;
     immediate?: boolean;
@@ -88,7 +90,24 @@ export class NgrxStoreWrapperService {
     args?: any;
   }> = {};
 
-  constructor(private injector: Injector, private http: HttpClient) {}
+  private pendingKeys = new Set<string>();  // Keys being set
+  private readyKeys = new Set<string>();    // Keys fully ready
+
+  constructor(private injector: Injector, private http: HttpClient) {
+    // Set up cleanup on destroy
+    const destroyRef = inject(DestroyRef);
+    destroyRef.onDestroy(() => this.ngOnDestroy());
+  }
+
+  private ngOnDestroy(): void {
+    // Clean up all polling subscriptions
+    Object.values(this.pollingSubscriptions).forEach(sub => sub.unsubscribe());
+    this.pollingSubscriptions = {};
+
+    // Clean up all persistence subscriptions
+    this.persistenceSubscriptions.forEach(sub => sub.unsubscribe());
+    this.persistenceSubscriptions.clear();
+  }
 
   public initializeStore(store: Store<StoreState>, reducerManager: ReducerManager): void {
     this.store = store;
@@ -107,15 +126,23 @@ export class NgrxStoreWrapperService {
   }
 
   public set(key: string, value: any): void {
+    this.pendingKeys.add(key);
     if (!this.store) {
+      this.pendingKeys.delete(key);
       throw new Error('Store must be initialized before setting data');
     }
 
     if (typeof key !== 'string') {
+      this.pendingKeys.delete(key);
       throw new Error('Key must be a string');
     }
-  
+
+    if (key.includes('.')) {
+      console.warn(`[ngrx-store-wrapper] Dots in key names may cause issues: "${key}"`);
+    }
+
     if (this.staticReducerKeys.has(key)) {
+      this.pendingKeys.delete(key);
       if (isDevMode()) {
         console.warn(`[ngrx-store-wrapper] Attempted to set static reducer key: "${key}"`);
       }
@@ -137,7 +164,12 @@ export class NgrxStoreWrapperService {
         }
       ));
   
-      this.reducerManager.addReducer(key, this.dynamicReducers[key]);
+      try {
+        this.reducerManager.addReducer(key, this.dynamicReducers[key]);
+      } catch (e) {
+        this.pendingKeys.delete(key);
+        throw e;
+      }
       if (isDevMode() && Object.keys(this.dynamicReducers).length > DYNAMIC_KEY_WARN_THRESHOLD) {
         console.warn(
           `[ngrx-store-wrapper] More than ${DYNAMIC_KEY_WARN_THRESHOLD} dynamic store keys registered.`
@@ -149,37 +181,55 @@ export class NgrxStoreWrapperService {
       );
     } 
     this.store.dispatch(this.dynamicActions[actionKey](value));
-  
-    if (this.persistedKeys.has(key)) {
-      const type = this.persistedKeys.get(key)!;
-      const storage = type === StorageType.Local ? localStorage : sessionStorage;
-      storage.setItem(key, JSON.stringify(value));
-    }
+    this.pendingKeys.delete(key);
+    this.readyKeys.add(key);
   }
+  private warnedKeys = new Set<string>();
 
-  public get<T = any>(key: string): Observable<T> {
+  public get<T = any>(key: string): Observable<T>;
+  public get<State, T>(selector: Selector<State, T>): Observable<T>;
+  public get<State, T>(identifier: string | Selector<State, T>): Observable<T> {
     if (!this.store) {
       throw new Error('Store must be initialized before getting data');
     }
-
-    if (!this.selectors[key]) {
-      this.selectors[key] = createSelector(
-        (state: StoreState) => state[key],
-        (val: T) => val
-      );
+    let selector;
+    if(typeof identifier === 'string') {
+      if (!this.pendingKeys.has(identifier) && !this.readyKeys.has(identifier)) {
+        return this.store.pipe(
+          select(state => state[identifier]),
+          filter(val => val !== undefined), // Wait until value exists
+          take(1),
+          timeout({
+            each: 5000,
+            with: () => throwError(() => 
+              new Error(`Key "${identifier}" not found after waiting. Did you call set() first?`))
+          }),
+          map(val => val as T)
+        );
+      }
+      if(this.pendingKeys.has(identifier)) {
+        return this.store.pipe(
+          select(state => state[identifier]),
+          filter(val => val !== undefined), // Wait for value
+          take(1),
+          map(val => val as T) // Type assertion
+        );
+      }
+      selector = this.selectors[identifier];
     }
-
-    const observable$ = this.store.pipe(select(this.selectors[key]));
+    else selector = identifier;
+    const observable$ = this.store.pipe(select(selector));
 
     try {
       const destroyRef = inject(DestroyRef);
       return observable$.pipe(takeUntilDestroyed(destroyRef));
     } catch {
-      if (isDevMode()) {
+      if (isDevMode() && !this.warnedKeys.has(identifier as string)) {
         console.warn(
           `[ngrx-store-wrapper] Auto-unsubscribe only works in components/services. ` +
-            `You're using 'get("${key}")' outside an Angular injection context.`
+            `You're using 'get("${identifier}")' outside an Angular injection context.`
         );
+        this.warnedKeys.add(identifier as string);  
       }
       return observable$;
     }
@@ -302,10 +352,9 @@ export class NgrxStoreWrapperService {
       const config = this.effectConfigs[key];
       if (!config) return;
       
-      const subscription = config.originalServiceFn()
+      config.originalServiceFn()
         .pipe(
-          take(1),
-          finalize(() => subscription?.unsubscribe())
+          take(1)
         )
         .subscribe({
           next: result => {
@@ -323,9 +372,6 @@ export class NgrxStoreWrapperService {
       this.removeEffect(key);
       
       const subscription = interval(intervalMs)
-        .pipe(
-          finalize(() => subscription?.unsubscribe())
-        )
         .subscribe(() => callApiAndDispatch());
       
       this.pollingSubscriptions[key] = subscription;
@@ -366,51 +412,108 @@ export class NgrxStoreWrapperService {
     delete this.dynamicReducers[key];
     delete this.dynamicActions[`set${key}`];
     delete this.selectors[key];
+    delete this.effectConfigs[key];
 
     this.removeEffect(key);
+    this.pendingKeys.delete(key);
+    this.readyKeys.delete(key);
 
-    if (this.persistedKeys.has(key)) {
-      const type = this.persistedKeys.get(key)!;
-      const storage = type === StorageType.Local ? localStorage : sessionStorage;
-      storage.removeItem(key);
-      this.persistedKeys.delete(key);
-      this.savePersistedKeys();
-    }
+    if (this.persistedKeys.has(key)) this.disablePersistence(key);
   }
 
   public enablePersistence(key: string, type: StorageType): void {
-    this.persistedKeys.set(key, type);
-    this.savePersistedKeys();
-
-    const storage = type === StorageType.Local ? localStorage : sessionStorage;
-    const valueInStorage = storage.getItem(key);
-
-    if (valueInStorage !== null) {
-      try {
-        this.set(key, JSON.parse(valueInStorage));
-      } catch (e) {
-        console.warn(`[ngrx-store-wrapper] Failed to parse persisted value for key: ${key}`);
-      }
-    } else {
-      this.store.pipe(select((state) => state[key]), take(1)).subscribe((val) => {
-        if (val !== undefined) {
-          try {
-            storage.setItem(key, JSON.stringify(val));
-          } catch {
-            console.warn(`[ngrx-store-wrapper] Failed to persist current value for key: ${key}`);
-          }
-        }
-      });
+    // 1. Key existence check (selector acts as verification)
+    if (!this.selectors[key]) {
+      throw new Error(
+        `[ngrx-store-wrapper] Key "${key}" does not exist in store. ` +
+        `Call set() before enablePersistence().`
+      );
     }
+  
+    const storage = type === StorageType.Local ? localStorage : sessionStorage;
+    if(this.persistedKeys.has(key)) {
+      if(this.persistedKeys.get(key) === type) {
+        if(isDevMode()) {
+          console.warn(`[ngrx-store-wrapper] Key "${key}" is already persisted.`);
+        }
+        return;
+      }
+      else{
+        console.warn(
+          `[ngrx-store-wrapper] Overwriting existing value for "${key}" in ` +
+          `${type === StorageType.Local ? 'localStorage' : 'sessionStorage'}`
+        );
+        this.disablePersistence(key);
+      }
+    }
+  
+    // 3. Persist current value (using existing selector)
+    this.store.pipe(
+      select(this.selectors[key]), // Guaranteed to exist
+      take(1)
+    ).subscribe(currentValue => {
+      try {
+        storage.setItem(key, JSON.stringify(currentValue));
+      } catch (e) {
+        if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+          console.error(`Storage quota exceeded for key "${key}"`);
+          this.disablePersistence(key); // Auto-disable if quota exceeded
+        } else {
+          console.error(`Persist failed for ${key}`, e);
+        }
+      }
+    });
+  
+    // 4. Set up future updates
+    this.persistedKeys.set(key, type);
+    this.updatePersistedKeysMeta(key, type);
+  
+    this.persistenceSubscriptions.get(key)?.unsubscribe();
+    this.persistenceSubscriptions.set(
+      key,
+      this.store.pipe(
+        select(this.selectors[key]), // Reuse selector
+        distinctUntilChanged(),
+        debounceTime(50)
+      ).subscribe(value => {
+        try {
+          storage.setItem(key, JSON.stringify(value));
+        } catch (e) {
+          console.error(`Persist update failed for ${key}`, e);
+        }
+      })
+    );
   }
 
   public disablePersistence(key: string): void {
-    if (!this.persistedKeys.has(key)) return;
+    if (!this.persistedKeys.has(key)) {
+      if (isDevMode()) {
+        console.warn(`[ngrx-store-wrapper] Key "${key}" is not currently persisted`);
+      }
+      return;
+    }
+  
     const type = this.persistedKeys.get(key)!;
     const storage = type === StorageType.Local ? localStorage : sessionStorage;
-    storage.removeItem(key);
+  
+    // Cleanup storage
+    try {
+      storage.removeItem(key);
+    } catch (e) {
+      console.error(`[ngrx-store-wrapper] Failed to remove "${key}" from storage:`, e);
+    }
+  
+    // Cleanup subscriptions
+    this.persistenceSubscriptions.get(key)?.unsubscribe();
+    this.persistenceSubscriptions.delete(key);
+  
+    // Update persistence state
+    this.updatePersistedKeysMeta(key, null);
     this.persistedKeys.delete(key);
-    this.savePersistedKeys();
+  
+    if (isDevMode()) {
+      console.log(`[ngrx-store-wrapper] Disabled persistence for key: "${key}"`);
+    }
   }
 
   private loadPersistedKeys(): void {
@@ -432,85 +535,99 @@ export class NgrxStoreWrapperService {
     }
   }
 
-  private savePersistedKeys(): void {
-    const local: Record<string, boolean> = {};
-    const session: Record<string, boolean> = {};
+  private updatePersistedKeysMeta(key: string, type: StorageType | null): void {
+    const targetType = type ?? this.persistedKeys.get(key);
+    if (!targetType) return;
 
-    this.persistedKeys.forEach((type, key) => {
-      if (type === StorageType.Local) local[key] = true;
-      if (type === StorageType.Session) session[key] = true;
-    });
+    const metaKey = targetType === StorageType.Local ? LOCAL_KEY_META : SESSION_KEY_META;
+    const storage = targetType === StorageType.Local ? localStorage : sessionStorage;
+    const currentMetaStr = storage.getItem(metaKey);
+    const meta: Record<string, boolean> = currentMetaStr ? JSON.parse(currentMetaStr) : {};
 
-    localStorage.setItem(LOCAL_KEY_META, JSON.stringify(local));
-    sessionStorage.setItem(SESSION_KEY_META, JSON.stringify(session));
-  }
+    if (type) {
+        meta[key] = true;
+    } else {
+        delete meta[key];
+    }
 
-  private restorePersistedState(): void {
-    this.persistedKeys.forEach((type, key) => {
-      const storage = type === StorageType.Local ? localStorage : sessionStorage;
+    storage.setItem(metaKey, JSON.stringify(meta));
+}
+
+private restorePersistedState(): void {
+  this.persistedKeys.forEach((type, key) => {
+    const storage = type === StorageType.Local ? localStorage : sessionStorage;
+    try {
       const value = storage.getItem(key);
       if (value) {
-        try {
-          this.set(key, JSON.parse(value));
-        } catch {
-          console.warn(`[ngrx-store-wrapper] Could not parse persisted data for key: ${key}`);
-        }
+        this.set(key, JSON.parse(value));
       }
-    });
+    } catch (e) {
+      console.error(`[ngrx-store-wrapper] Failed to restore persisted state for key "${key}", removing key from storage`, e);
+      storage.removeItem(key);
+    }
+  });
+}
+
+private readonly autoBindCache = new WeakMap<Function, Function>();
+
+private autoBind(fn: Function, context?: any): (...args: any[]) => Observable<any> {
+  if (typeof fn !== 'function') {
+    throw new Error('[ngrx-store-wrapper] serviceFn must be a function');
   }
 
-  private autoBind(fn: Function, context?: any): (...args: any[]) => Observable<any> {
-    if (typeof fn !== 'function') {
-      throw new Error('[ngrx-store-wrapper] serviceFn must be a function');
-    }
+  if (this.autoBindCache.has(fn)) {
+    return this.autoBindCache.get(fn)! as (...args: any[]) => Observable<any>;
+  }
 
-    // If context is provided, just bind to it
-    if (context) return fn.bind(context);
+  let boundFn: Function | null = null;
 
-    // Check if already bound
-    if (autoBindMetadata.has(fn)) {
-      const ownerClass = autoBindMetadata.get(fn)!;
-      const instance = this.injector.get(ownerClass, { optional: true });
-      if (instance) return fn.bind(instance);
-    }
-
+  // If context is provided, just bind to it
+  if (context) {
+    boundFn = fn.bind(context);
+  } else if (autoBindMetadata.has(fn)) {
+    const ownerClass = autoBindMetadata.get(fn)!;
+    const instance = this.injector.get(ownerClass, { optional: true });
+    if (instance) boundFn = fn.bind(instance);
+  } else {
     // Check for wrapped functions
     const originalFn = (fn as any).__originalFn;
     if (originalFn && autoBindMetadata.has(originalFn)) {
       const ownerClass = autoBindMetadata.get(originalFn)!;
       const instance = this.injector.get(ownerClass, { optional: true });
-      if (instance) return fn.bind(instance);
-    }
-
-    // Additional check for bound functions
-    if ((fn as any).__autoBound) {
+      if (instance) boundFn = fn.bind(instance);
+    } else if ((fn as any).__autoBound) {
       const ownerClass = autoBindMetadata.get(fn);
       if (ownerClass) {
         const instance = this.injector.get(ownerClass, { optional: true });
-        if (instance) return fn.bind(instance);
+        if (instance) boundFn = fn.bind(instance);
       }
-    }
-
-    // For class methods not decorated with @AutoBind
-    if (fn.name) {
+    } else if (fn.name) {
       try {
         const classNameMatch = fn.name.match(/^bound (\w+)/);
         const className = classNameMatch ? classNameMatch[1] : fn.name.split('.').shift();
-        
         if (className) {
           const ownerClass = this.findClassByName(className);
           if (ownerClass) {
             const instance = this.injector.get(ownerClass, { optional: true });
-            if (instance) return fn.bind(instance);
+            if (instance) boundFn = fn.bind(instance);
           }
         }
       } catch (e) {
         console.warn('[ngrx-store-wrapper] Auto-bind name parsing failed', e);
       }
     }
+  }
 
+  if (!boundFn) {
     throw new Error('[ngrx-store-wrapper] Failed to auto-bind serviceFn. Use @AutoBind() or provide context.');
   }
+
+  (boundFn as any).__autoBound = true;
+  this.autoBindCache.set(fn, boundFn);
+
+  return boundFn as (...args: any[]) => Observable<any>;
+}
+
   
   private findClassByName(name: string): Type<any> | null {
     // This is a simplified approach - you might need a more robust solution

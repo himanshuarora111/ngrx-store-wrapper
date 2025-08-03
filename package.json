@@ -1,6 +1,6 @@
 {
   "name": "ngrx-store-wrapper",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Angular library that lets you manage NgRx store state without writing actions, reducers, or effects manually, with built-in support for syncing to session and local storage",
   "author": "Himanshu Arora",
   "license": "MIT",

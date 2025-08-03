@@ -1,5 +1,5 @@
 import { inject, runInInjectionContext, EnvironmentInjector } from '@angular/core';
-import { Store } from '@ngrx/store';
+import { Store, Selector } from '@ngrx/store';
 import { ReducerManager } from '@ngrx/store';
 import { NgrxStoreWrapperService, StoreState } from './ngrx-store-wrapper.service';
 import { StorageType } from './storage-type.enum';
@@ -29,9 +29,13 @@ export const storeWrapper = {
     ensureInitialized();
     service.set(key, value);
   },
-  get: <T = any>(key: string) => {
+  get: <T = any, State = any>(identifier: string | Selector<State, T>): Observable<T> => {
     ensureInitialized();
-    return service.get<T>(key);
+    if (typeof identifier === 'string') {
+      return service.get(identifier) as Observable<T>;
+    } else {
+      return service.get<State, T>(identifier);
+    }
   },
   remove: (key: string) => {
     ensureInitialized();
